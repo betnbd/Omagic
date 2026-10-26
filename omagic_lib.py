@@ -201,13 +201,53 @@ def hid_devices() -> list[dict]:
     return out
 
 
-def batteries() -> dict[str, dict]:
+def norm_serial(value: str) -> str:
+    """Compare HID serials and Bluetooth addresses despite case or '-' vs ':'."""
+    return (value or "").lower().replace("-", ":")
+
+
+def power_supply_serial(name: str) -> str:
+    """Serial from hid-<serial>-battery or hid-<serial>-battery-<report id>."""
+    prefix = "hid-"
+    marker = "-battery"
+    if not name.startswith(prefix):
+        return ""
+    rest = name[len(prefix) :]
+    idx = rest.rfind(marker)
+    if idx <= 0:
+        return ""
+    tail = rest[idx + len(marker) :]
+    # Older kernels omit the report id; current kernels append it (battery-144).
+    if tail and not (tail.startswith("-") and tail[1:].isdigit()):
+        return ""
+    return rest[:idx]
+
+
+def _kinds_by_serial(hid: list[dict] | None = None) -> dict[str, str]:
+    kinds: dict[str, str] = {}
+    for dev in hid_devices() if hid is None else hid:
+        serial = norm_serial(dev.get("serial") or "")
+        if serial and serial not in kinds:
+            kinds[serial] = dev["kind"]
+    return kinds
+
+
+def batteries(hid: list[dict] | None = None) -> dict[str, dict]:
     result: dict[str, dict] = {}
     if not POWER_SYS.is_dir():
         return result
+    kinds_by_serial: dict[str, str] | None = None
     for node in POWER_SYS.iterdir():
         model = read_text(node / "model_name")
+        serial = power_supply_serial(node.name)
         kind = classify_name(model)
+        if not kind and serial:
+            # model_name is the Bluetooth alias (the HID device name). A renamed
+            # Magic Trackpad or keyboard no longer says "Magic", but the supply
+            # is still hid-<serial>-battery[-<id>] for that device's HID_UNIQ.
+            if kinds_by_serial is None:
+                kinds_by_serial = _kinds_by_serial(hid)
+            kind = kinds_by_serial.get(norm_serial(serial))
         if not kind:
             continue
         cap = read_text(node / "capacity")
@@ -216,11 +256,6 @@ def batteries() -> dict[str, dict]:
             capacity = int(cap)
         except ValueError:
             continue
-        # hid-<serial>-battery-<n>
-        serial = ""
-        name = node.name
-        if name.startswith("hid-") and "-battery-" in name:
-            serial = name[len("hid-") :].rsplit("-battery-", 1)[0]
         key = serial or model
         prev = result.get(key)
         if prev and prev.get("capacity") == capacity:
@@ -413,7 +448,7 @@ def enabled_plugin_ids() -> set[str]:
 def merge_devices() -> dict:
     hypr = hypr_devices()
     hid = hid_devices()
-    bats = batteries()
+    bats = batteries(hid)
     bt = bluetooth_magic()
 
     def group(kind: str) -> list[dict]:
@@ -459,16 +494,13 @@ def merge_devices() -> dict:
                 for rec in buckets.values():
                     if name not in rec["hyprNames"]:
                         rec["hyprNames"].append(name)
-        def _norm(s: str) -> str:
-            return (s or "").lower().replace("-", ":")
-
         for serial, bat in bats.items():
             if bat["kind"] != kind:
                 continue
-            matched = buckets.get(serial) or buckets.get(_norm(serial))
+            matched = buckets.get(serial) or buckets.get(norm_serial(serial))
             if not matched:
                 for rec in buckets.values():
-                    if _norm(rec.get("serial") or "") == _norm(serial):
+                    if norm_serial(rec.get("serial") or "") == norm_serial(serial):
                         matched = rec
                         break
             if not matched:
@@ -485,7 +517,7 @@ def merge_devices() -> dict:
             if b["kind"] != kind:
                 continue
             target = next((rec for rec in buckets.values()
-                           if _norm(rec["serial"]) == _norm(b["address"])), None)
+                           if norm_serial(rec["serial"]) == norm_serial(b["address"])), None)
             if target is None and b.get("connected"):
                 candidates = [rec for rec in buckets.values()
                               if not rec["serial"] and not rec["bluetooth"]]

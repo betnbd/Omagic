@@ -101,6 +101,113 @@ class BluetoothTests(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
 
 
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
+
+
+def _hid(node: Path, hid_id: str, name: str, uniq: str) -> None:
+    _write(node / "uevent", f"HID_ID={hid_id}\nHID_NAME={name}\nHID_UNIQ={uniq}\nHID_PHYS=\n")
+
+
+def _supply(node: Path, model: str, capacity: str, status: str) -> None:
+    _write(node / "model_name", model)
+    _write(node / "capacity", capacity)
+    _write(node / "status", status)
+
+
+class BatteryTests(unittest.TestCase):
+    """Renamed Bluetooth aliases land in power_supply model_name, not 'Magic Trackpad'."""
+
+    ALIAS = "James Caudill\u2019s Trackpad"
+
+    def test_alias_is_not_classified_by_name(self):
+        self.assertIsNone(om.classify_name(self.ALIAS))
+        self.assertIsNone(om.classify_name("Study Keyboard"))
+
+    def test_supply_serial_formats(self):
+        cases = {
+            "hid-04:4b:ed:eb:f5:10-battery-144": "04:4b:ed:eb:f5:10",
+            "hid-04:4b:ed:eb:f5:10-battery": "04:4b:ed:eb:f5:10",
+            "hid-04-4b-ed-eb-f5-10-battery-144": "04-4b-ed-eb-f5-10",
+            "BAT0": "",
+            "hid-battery-1": "",
+            "hid-04:4b:ed:eb:f5:10-battery-extra": "",
+        }
+        for name, serial in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(om.power_supply_serial(name), serial)
+
+    def test_renamed_trackpad_battery_uses_hid_serial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hid = root / "hid"
+            power = root / "power"
+            _hid(hid / "0005:004C:0265.0001", "0005:0000004C:00000265", self.ALIAS, "04:4b:ed:eb:f5:10")
+            _hid(hid / "0005:004C:0320.0002", "0005:0000004C:00000320", "Study Keyboard", "aa:bb:cc:dd:ee:02")
+            _hid(hid / "0003:046D:B035.0003", "0003:0000046D:0000B035", "Logitech MX Master", "11:22:33:44:55:66")
+            _supply(power / "hid-04:4b:ed:eb:f5:10-battery-144", self.ALIAS, "38", "Discharging")
+            _supply(power / "hid-aa:bb:cc:dd:ee:02-battery-9", "Study Keyboard", "64", "Charging")
+            _supply(power / "hid-11:22:33:44:55:66-battery-1", "Logitech MX Master", "40", "Discharging")
+            _supply(power / "hid-aa:bb:cc:dd:ee:11-battery-47", "Magic Keyboard", "91", "Full")
+            _supply(power / "BAT0", "Internal Battery", "77", "Discharging")
+            _supply(power / "hid-de:ad:00:00:00:01-battery-2", "Spare Trackpad", "10", "Discharging")
+            with patch.object(om, "HID_SYS", hid), patch.object(om, "POWER_SYS", power):
+                found = om.batteries()
+        trackpad = found["04:4b:ed:eb:f5:10"]
+        self.assertEqual(trackpad["kind"], "trackpad")
+        self.assertEqual(trackpad["model"], self.ALIAS)
+        self.assertEqual(trackpad["capacity"], 38)
+        self.assertEqual(trackpad["status"], "Discharging")
+        self.assertEqual(found["aa:bb:cc:dd:ee:02"]["kind"], "keyboard")
+        self.assertEqual(found["aa:bb:cc:dd:ee:02"]["capacity"], 64)
+        self.assertEqual(found["aa:bb:cc:dd:ee:11"], {
+            "kind": "keyboard", "model": "Magic Keyboard", "capacity": 91,
+            "status": "Full", "serial": "aa:bb:cc:dd:ee:11",
+        })
+        self.assertNotIn("11:22:33:44:55:66", found)
+        self.assertNotIn("Internal Battery", found)
+        self.assertNotIn("de:ad:00:00:00:01", found)
+        self.assertNotIn("Spare Trackpad", found)
+
+    def test_serial_match_ignores_case_separator_and_legacy_suffix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hid = root / "hid"
+            power = root / "power"
+            _hid(hid / "trackpad", "0005:0000004C:00000265", self.ALIAS, "04:4b:ed:eb:f5:10")
+            _hid(hid / "keyboard", "0005:000005AC:00000321", "Magic Keyboard", "AA-BB-CC-DD-EE-03")
+            _supply(power / "hid-04-4B-ed-eb-f5-10-battery-144", self.ALIAS, "38", "Discharging")
+            _supply(power / "hid-aa:bb:cc:dd:ee:03-battery", "Desk Keyboard", "55", "Discharging")
+            with patch.object(om, "HID_SYS", hid), patch.object(om, "POWER_SYS", power):
+                found = om.batteries()
+        self.assertEqual(found["04-4B-ed-eb-f5-10"]["kind"], "trackpad")
+        self.assertEqual(found["04-4B-ed-eb-f5-10"]["capacity"], 38)
+        self.assertEqual(found["aa:bb:cc:dd:ee:03"]["kind"], "keyboard")
+        self.assertEqual(found["aa:bb:cc:dd:ee:03"]["capacity"], 55)
+
+    def test_renamed_trackpad_battery_is_shown_beside_keyboard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hid = root / "hid"
+            power = root / "power"
+            _hid(hid / "0005:004C:0265.0001", "0005:0000004C:00000265", self.ALIAS, "04:4b:ed:eb:f5:10")
+            _hid(hid / "0005:004C:0320.0002", "0005:0000004C:00000320", "Magic Keyboard", "aa:bb:cc:dd:ee:11")
+            _supply(power / "hid-04:4b:ed:eb:f5:10-battery-144", self.ALIAS, "38", "Discharging")
+            _supply(power / "hid-aa:bb:cc:dd:ee:11-battery-47", "Magic Keyboard", "91", "Discharging")
+            hypr = {"keyboard": ["magic-keyboard"], "trackpad": ["magic-trackpad"]}
+            with patch.object(om, "HID_SYS", hid), patch.object(om, "POWER_SYS", power), \
+                 patch.object(om, "hypr_devices", return_value=hypr), \
+                 patch.object(om, "bluetooth_magic", return_value=[]), \
+                 patch.object(om, "enabled_plugin_ids", return_value=set()), \
+                 patch.object(om, "load_settings", return_value=dict(om.DEFAULT_SETTINGS)):
+                snapshot = om.merge_devices()
+        self.assertTrue(snapshot["trackpad"]["present"])
+        self.assertEqual(snapshot["trackpad"]["devices"], [{"link": "Connected", "battery": 38}])
+        self.assertTrue(snapshot["keyboard"]["present"])
+        self.assertEqual(snapshot["keyboard"]["devices"], [{"link": "Connected", "battery": 91}])
+
+
 class ProfileTests(unittest.TestCase):
     def test_tap_is_persistent_and_device_scoped(self):
         profile = om.render_profile(['a"b\\c\nd'], {"tapToClick": True, "workspaceSwipe": False})

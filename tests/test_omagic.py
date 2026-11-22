@@ -170,6 +170,21 @@ class BatteryTests(unittest.TestCase):
         self.assertNotIn("de:ad:00:00:00:01", found)
         self.assertNotIn("Spare Trackpad", found)
 
+    def test_renamed_original_magic_keyboards_use_hid_serial(self):
+        for product in ("0267", "026c"):
+            with self.subTest(product=product), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                hid = root / "hid"
+                power = root / "power"
+                serial = "aa:bb:cc:dd:ee:02"
+                name = "Study Keyboard"
+                _hid(hid / "keyboard", f"0005:0000004C:0000{product}", name, serial)
+                _supply(power / f"hid-{serial}-battery-9", name, "64", "Charging")
+                with patch.object(om, "HID_SYS", hid), patch.object(om, "POWER_SYS", power):
+                    found = om.batteries()
+                self.assertEqual(found[serial]["kind"], "keyboard")
+                self.assertEqual(found[serial]["capacity"], 64)
+
     def test_serial_match_ignores_case_separator_and_legacy_suffix(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

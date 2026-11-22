@@ -168,6 +168,8 @@ def hid_devices() -> list[dict]:
         if not kind:
             if vendor in APPLE_VENDOR and product in {
                 "0265",
+                "0267",
+                "026c",
                 "029a",
                 "029c",
                 "029f",
